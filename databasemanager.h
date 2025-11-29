@@ -26,20 +26,39 @@ public:
         bool isPrimaryKey;
         bool isIdentity;
         bool isNullable;
+        QString defaultValue;
+        QString fullType;
+    };
+
+    struct ForeignKeyInfo {
+        QString constraintName;
+        QString columnName;
+        QString refTable;
+        QString refColumn;
+        QString onDelete;
+        QString onUpdate;
+    };
+
+    struct ConstraintInfo {
+        QString constraintName;
+        QString constraintType;
+        QString definition;
     };
 
     QSqlDatabase& getDatabase();
     QList<ColumnInfo> getTableColumns(const QString &tableName);
+    QList<ForeignKeyInfo> getTableForeignKeys(const QString &tableName);
+    QList<ConstraintInfo> getTableConstraints(const QString &tableName);
     QList<QVariantList> getTableData(const QString &tableName);
     bool createTable(const QString &tableName, const QList<ColumnInfo> &columns, QString *error = nullptr);
     bool dropTable(const QString &tableName, QString *error = nullptr);
     bool insertRow(const QString &tableName, const QVariantList &values, QString *error = nullptr);
     bool deleteRow(const QString &tableName, const QVariantList &primaryKeyValues, QString *error = nullptr);
     bool updateCell(const QString &tableName,
-                                     const QString &columnName,
-                                     const QVariant &value,
-                                     const QVariantList &primaryKeyValues,
-                                     QString *error);
+                    const QString &columnName,
+                    const QVariant &value,
+                    const QVariantList &primaryKeyValues,
+                    QString *error);
     bool addColumn(const QString &tableName, const ColumnInfo &column, QString *error = nullptr);
     bool dropColumn(const QString &tableName, const QString &columnName, QString *error = nullptr);
     bool renameColumn(const QString &tableName, const QString &oldName, const QString &newName, QString *error = nullptr);

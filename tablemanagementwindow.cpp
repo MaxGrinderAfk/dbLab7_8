@@ -231,16 +231,58 @@ void CollapsibleTableWidget::onAddColumn()
 
     if (!ok || colName.isEmpty()) return;
 
-    QStringList types = {"int", "text", "int (auto)"};
-    QString colType = QInputDialog::getItem(this, "Добавить столбец", "Тип данных:", types, 0, false, &ok);
+    QDialog dialog(this);
+    dialog.setWindowTitle("Параметры столбца");
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
 
-    if (!ok) return;
+    QHBoxLayout *typeLayout = new QHBoxLayout();
+    QLabel *typeLabel = new QLabel("Тип данных:", &dialog);
+    QComboBox *typeCombo = new QComboBox(&dialog);
+    typeCombo->addItem("text");
+    typeCombo->addItem("bigint");
+    typeCombo->addItem("integer");
+    typeCombo->addItem("date");
+    typeCombo->addItem("boolean");
+    typeCombo->addItem("numeric");
+    typeCombo->addItem("varchar");
+    typeLayout->addWidget(typeLabel);
+    typeLayout->addWidget(typeCombo);
+    layout->addLayout(typeLayout);
+
+    QCheckBox *identityCheck = new QCheckBox("Auto (SERIAL)", &dialog);
+    layout->addWidget(identityCheck);
+
+    QCheckBox *nullableCheck = new QCheckBox("Nullable", &dialog);
+    nullableCheck->setChecked(true);
+    layout->addWidget(nullableCheck);
+
+    QHBoxLayout *defaultLayout = new QHBoxLayout();
+    QLabel *defaultLabel = new QLabel("Default:", &dialog);
+    QLineEdit *defaultEdit = new QLineEdit(&dialog);
+    defaultEdit->setPlaceholderText("NULL или значение");
+    defaultLayout->addWidget(defaultLabel);
+    defaultLayout->addWidget(defaultEdit);
+    layout->addLayout(defaultLayout);
+
+    QHBoxLayout *buttonsLayout = new QHBoxLayout();
+    QPushButton *okButton = new QPushButton("OK", &dialog);
+    QPushButton *cancelButton = new QPushButton("Отмена", &dialog);
+    connect(okButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+    buttonsLayout->addWidget(okButton);
+    buttonsLayout->addWidget(cancelButton);
+    layout->addLayout(buttonsLayout);
+
+    if (dialog.exec() != QDialog::Accepted) return;
 
     DatabaseManager::ColumnInfo col;
     col.name = colName;
-    col.isIdentity = colType.contains("auto");
-    col.type = colType.contains("int") ? "int" : "text";
+    col.fullType = typeCombo->currentText();
+    col.type = col.fullType.contains("int") ? "int" : "text";
+    col.isIdentity = identityCheck->isChecked();
     col.isPrimaryKey = false;
+    col.isNullable = nullableCheck->isChecked();
+    col.defaultValue = defaultEdit->text().trimmed();
 
     QString error;
     if (DatabaseManager::instance().addColumn(tableName, col, &error)) {

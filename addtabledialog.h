@@ -1,6 +1,5 @@
 #ifndef ADDTABLEDIALOG_H
 #define ADDTABLEDIALOG_H
-
 #include <QDialog>
 #include <QLineEdit>
 #include <QComboBox>
@@ -10,29 +9,33 @@
 #include <QLabel>
 #include <QScrollArea>
 #include <QVector>
+#include <QCheckBox>
 #include "databasemanager.h"
 
 class ColumnInputWidget : public QWidget
 {
     Q_OBJECT
-
 public:
     explicit ColumnInputWidget(QWidget *parent = nullptr);
-
     QString getColumnName() const;
     QString getColumnType() const;
     bool isPrimaryKey() const;
+    bool isIdentity() const;
+    bool isNullable() const;
+    QString getDefaultValue() const;
 
 private:
     QLineEdit *nameEdit;
     QComboBox *typeCombo;
-    QComboBox *primaryKeyCombo;
+    QCheckBox *primaryKeyCheck;
+    QCheckBox *identityCheck;
+    QCheckBox *nullableCheck;
+    QLineEdit *defaultEdit;
 };
 
 class AddTableDialog : public QDialog
 {
     Q_OBJECT
-
 public:
     explicit AddTableDialog(QWidget *parent = nullptr);
 
@@ -51,7 +54,6 @@ private:
     QPushButton *addColumnButton;
     QPushButton *removeColumnButton;
     QPushButton *confirmButton;
-
     QVector<ColumnInputWidget*> columnWidgets;
 };
 

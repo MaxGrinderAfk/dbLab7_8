@@ -115,7 +115,9 @@ QList<DatabaseManager::ColumnInfo> DatabaseManager::getTableColumns(const QStrin
                            "SELECT "
                            "    c.column_name, "
                            "    c.data_type, "
+                           "    c.udt_name, "
                            "    c.is_nullable, "
+                           "    c.column_default, "
                            "    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_primary, "
                            "    CASE "
                            "        WHEN c.column_default LIKE 'nextval%%' THEN true "
@@ -142,15 +144,101 @@ QList<DatabaseManager::ColumnInfo> DatabaseManager::getTableColumns(const QStrin
             ColumnInfo col;
             col.name = query.value(0).toString();
             QString dataType = query.value(1).toString();
-            col.type = dataType.contains("int") ? "int" : "text";
-            col.isNullable = query.value(2).toString() == "YES";
-            col.isPrimaryKey = query.value(3).toBool();
-            col.isIdentity = query.value(4).toBool();
+            QString udtName = query.value(2).toString();
+
+            col.fullType = (dataType == "USER-DEFINED") ? udtName : dataType;
+            if (col.fullType == "int8") col.fullType = "bigint";
+            if (col.fullType == "int4") col.fullType = "integer";
+
+            col.type = col.fullType.contains("int") ? "int" : "text";
+            col.isNullable = query.value(3).toString() == "YES";
+            col.defaultValue = query.value(4).toString();
+            col.isPrimaryKey = query.value(5).toBool();
+            col.isIdentity = query.value(6).toBool();
             columns.append(col);
         }
     }
 
     return columns;
+}
+
+QList<DatabaseManager::ForeignKeyInfo> DatabaseManager::getTableForeignKeys(const QString &tableName)
+{
+    QList<ForeignKeyInfo> fks;
+
+    QSqlQuery query(db);
+    QString queryStr = QString(
+                           "SELECT "
+                           "    tc.constraint_name, "
+                           "    kcu.column_name, "
+                           "    ccu.table_name AS foreign_table_name, "
+                           "    ccu.column_name AS foreign_column_name, "
+                           "    rc.delete_rule, "
+                           "    rc.update_rule "
+                           "FROM information_schema.table_constraints AS tc "
+                           "JOIN information_schema.key_column_usage AS kcu "
+                           "    ON tc.constraint_name = kcu.constraint_name "
+                           "    AND tc.table_schema = kcu.table_schema "
+                           "JOIN information_schema.constraint_column_usage AS ccu "
+                           "    ON ccu.constraint_name = tc.constraint_name "
+                           "    AND ccu.table_schema = tc.table_schema "
+                           "JOIN information_schema.referential_constraints AS rc "
+                           "    ON rc.constraint_name = tc.constraint_name "
+                           "    AND rc.constraint_schema = tc.table_schema "
+                           "WHERE tc.constraint_type = 'FOREIGN KEY' "
+                           "    AND tc.table_schema = '%1' "
+                           "    AND tc.table_name = '%2'"
+                           ).arg(schemaName, tableName);
+
+    if (query.exec(queryStr)) {
+        while (query.next()) {
+            ForeignKeyInfo fk;
+            fk.constraintName = query.value(0).toString();
+            fk.columnName = query.value(1).toString();
+            fk.refTable = query.value(2).toString();
+            fk.refColumn = query.value(3).toString();
+            fk.onDelete = query.value(4).toString();
+            fk.onUpdate = query.value(5).toString();
+            fks.append(fk);
+        }
+    }
+
+    return fks;
+}
+
+QList<DatabaseManager::ConstraintInfo> DatabaseManager::getTableConstraints(const QString &tableName)
+{
+    QList<ConstraintInfo> constraints;
+
+    QSqlQuery query(db);
+    QString queryStr = QString(
+                           "SELECT "
+                           "    con.conname AS constraint_name, "
+                           "    CASE con.contype "
+                           "        WHEN 'c' THEN 'CHECK' "
+                           "        WHEN 'u' THEN 'UNIQUE' "
+                           "        ELSE con.contype::text "
+                           "    END AS constraint_type, "
+                           "    pg_get_constraintdef(con.oid) AS definition "
+                           "FROM pg_constraint con "
+                           "JOIN pg_class cls ON con.conrelid = cls.oid "
+                           "JOIN pg_namespace nsp ON cls.relnamespace = nsp.oid "
+                           "WHERE nsp.nspname = '%1' "
+                           "    AND cls.relname = '%2' "
+                           "    AND con.contype IN ('c', 'u')"
+                           ).arg(schemaName, tableName);
+
+    if (query.exec(queryStr)) {
+        while (query.next()) {
+            ConstraintInfo c;
+            c.constraintName = query.value(0).toString();
+            c.constraintType = query.value(1).toString();
+            c.definition = query.value(2).toString();
+            constraints.append(c);
+        }
+    }
+
+    return constraints;
 }
 
 QList<QVariantList> DatabaseManager::getTableData(const QString &tableName)
@@ -194,8 +282,20 @@ bool DatabaseManager::createTable(const QString &tableName, const QList<ColumnIn
         if (col.isIdentity) {
             colDef = QString("%1 BIGSERIAL").arg(col.name);
         } else {
-            colDef = QString("%1 %2").arg(col.name, col.type.toUpper() == "INT" ? "BIGINT" : "TEXT");
+            QString colType = col.fullType.isEmpty() ?
+                                  (col.type.toUpper() == "INT" ? "BIGINT" : "TEXT") :
+                                  col.fullType.toUpper();
+            colDef = QString("%1 %2").arg(col.name, colType);
         }
+
+        if (!col.isNullable && !col.isIdentity) {
+            colDef += " NOT NULL";
+        }
+
+        if (!col.defaultValue.isEmpty() && !col.isIdentity) {
+            colDef += " DEFAULT " + col.defaultValue;
+        }
+
         columnDefs.append(colDef);
 
         if (col.isPrimaryKey) {
@@ -244,17 +344,15 @@ bool DatabaseManager::insertRow(const QString &tableName, const QVariantList &va
     QVariantList bindValues;
 
     for (int i = 0; i < columns.size(); ++i) {
-        // Пропускаем identity (автоинкремент) — их не вставляем вручную
         if (columns[i].isIdentity) continue;
 
         columnNames.append(columns[i].name);
         placeholders.append("?");
 
-        // Если значение пустое / null — положим явный NULL (QVariant())
         const QVariant &val = values[i];
         if (!val.isValid() || val.isNull() || (val.type() == QVariant::String && val.toString().trimmed().isEmpty())) {
-            bindValues.append(QVariant(QVariant::String)); // явный пустой QVariant, будет интерпретирован как NULL
-            bindValues.last() = QVariant(); // гарантируем NULL
+            bindValues.append(QVariant(QVariant::String));
+            bindValues.last() = QVariant();
         } else {
             bindValues.append(val);
         }
@@ -287,7 +385,6 @@ bool DatabaseManager::syncSequence(const QString &tableName, QString *error)
 
     for (const auto &col : columns) {
         if (col.isIdentity) {
-
             QString seqName = QString("%1_%2_seq").arg(tableName, col.name);
 
             QString queryStr = QString(
@@ -390,7 +487,6 @@ bool DatabaseManager::updateCell(const QString &tableName,
     return true;
 }
 
-
 bool DatabaseManager::addColumn(const QString &tableName, const ColumnInfo &column, QString *error)
 {
     QString dataType;
@@ -455,11 +551,39 @@ QJsonObject DatabaseManager::exportTableToJson(const QString &tableName)
         QJsonObject colObj;
         colObj["name"] = col.name;
         colObj["type"] = col.type;
+        colObj["fullType"] = col.fullType;
         colObj["isPrimaryKey"] = col.isPrimaryKey;
         colObj["isIdentity"] = col.isIdentity;
+        colObj["isNullable"] = col.isNullable;
+        colObj["defaultValue"] = col.defaultValue;
         columnsArray.append(colObj);
     }
     tableObj["columns"] = columnsArray;
+
+    auto fks = getTableForeignKeys(tableName);
+    QJsonArray fksArray;
+    for (const auto &fk : fks) {
+        QJsonObject fkObj;
+        fkObj["constraintName"] = fk.constraintName;
+        fkObj["columnName"] = fk.columnName;
+        fkObj["refTable"] = fk.refTable;
+        fkObj["refColumn"] = fk.refColumn;
+        fkObj["onDelete"] = fk.onDelete;
+        fkObj["onUpdate"] = fk.onUpdate;
+        fksArray.append(fkObj);
+    }
+    tableObj["foreignKeys"] = fksArray;
+
+    auto constraints = getTableConstraints(tableName);
+    QJsonArray constraintsArray;
+    for (const auto &c : constraints) {
+        QJsonObject cObj;
+        cObj["constraintName"] = c.constraintName;
+        cObj["constraintType"] = c.constraintType;
+        cObj["definition"] = c.definition;
+        constraintsArray.append(cObj);
+    }
+    tableObj["constraints"] = constraintsArray;
 
     auto data = getTableData(tableName);
     QJsonArray dataArray;
@@ -493,13 +617,64 @@ bool DatabaseManager::importTableFromJson(const QJsonObject &json, QString *erro
         ColumnInfo col;
         col.name = colObj["name"].toString();
         col.type = colObj["type"].toString();
+        col.fullType = colObj["fullType"].toString();
         col.isPrimaryKey = colObj["isPrimaryKey"].toBool();
         col.isIdentity = colObj["isIdentity"].toBool(false);
+        col.isNullable = colObj["isNullable"].toBool(true);
+        col.defaultValue = colObj["defaultValue"].toString();
         columns.append(col);
     }
 
     if (!createTable(tableName, columns, error)) {
         return false;
+    }
+
+    QJsonArray fksArray = json["foreignKeys"].toArray();
+    for (const auto &fkValue : fksArray) {
+        QJsonObject fkObj = fkValue.toObject();
+
+        QString onDelete = fkObj["onDelete"].toString().toUpper();
+        QString onUpdate = fkObj["onUpdate"].toString().toUpper();
+
+        QString fkQuery = QString(
+                              "ALTER TABLE %1 ADD CONSTRAINT %2 "
+                              "FOREIGN KEY (%3) REFERENCES %4(%5)"
+                              ).arg(tableName,
+                                   fkObj["constraintName"].toString(),
+                                   fkObj["columnName"].toString(),
+                                   fkObj["refTable"].toString(),
+                                   fkObj["refColumn"].toString());
+
+        if (!onDelete.isEmpty() && onDelete != "NO ACTION") {
+            fkQuery += " ON DELETE " + onDelete.replace("_", " ");
+        }
+
+        if (!onUpdate.isEmpty() && onUpdate != "NO ACTION") {
+            fkQuery += " ON UPDATE " + onUpdate.replace("_", " ");
+        }
+
+        QSqlQuery query(db);
+        if (!query.exec(fkQuery)) {
+            if (error) *error = "FK constraint error: " + query.lastError().text();
+            return false;
+        }
+    }
+
+    QJsonArray constraintsArray = json["constraints"].toArray();
+    for (const auto &cValue : constraintsArray) {
+        QJsonObject cObj = cValue.toObject();
+
+        QString constraintQuery = QString(
+                                      "ALTER TABLE %1 ADD CONSTRAINT %2 %3"
+                                      ).arg(tableName,
+                                           cObj["constraintName"].toString(),
+                                           cObj["definition"].toString());
+
+        QSqlQuery query(db);
+        if (!query.exec(constraintQuery)) {
+            if (error) *error = "Constraint error: " + query.lastError().text();
+            return false;
+        }
     }
 
     QJsonArray dataArray = json["data"].toArray();
@@ -537,12 +712,159 @@ QJsonArray DatabaseManager::exportDatabaseToJson()
 
 bool DatabaseManager::importDatabaseFromJson(const QJsonArray &json, QString *error)
 {
+    QSqlQuery query(db);
+
+    if (!query.exec("BEGIN")) {
+        if (error) *error = "Failed to begin transaction";
+        return false;
+    }
+
+    QMap<QString, QJsonObject> tableData;
+    QMap<QString, QStringList> tableDependencies;
+
     for (const auto &tableValue : json) {
         QJsonObject tableObj = tableValue.toObject();
-        if (!importTableFromJson(tableObj, error)) {
+        QString tableName = tableObj["name"].toString();
+        tableData[tableName] = tableObj;
+
+        QStringList deps;
+        QJsonArray fksArray = tableObj["foreignKeys"].toArray();
+        for (const auto &fkValue : fksArray) {
+            QJsonObject fkObj = fkValue.toObject();
+            QString refTable = fkObj["refTable"].toString();
+            if (refTable != tableName && !deps.contains(refTable)) {
+                deps.append(refTable);
+            }
+        }
+        tableDependencies[tableName] = deps;
+    }
+
+    QStringList sortedTables;
+    QSet<QString> processed;
+
+    std::function<bool(const QString&)> addTableWithDeps = [&](const QString &table) -> bool {
+        if (processed.contains(table)) {
+            return true;
+        }
+
+        if (!tableData.contains(table)) {
+            return true;
+        }
+
+        for (const QString &dep : tableDependencies[table]) {
+            if (!addTableWithDeps(dep)) {
+                return false;
+            }
+        }
+
+        processed.insert(table);
+        sortedTables.append(table);
+        return true;
+    };
+
+    for (const QString &tableName : tableData.keys()) {
+        if (!addTableWithDeps(tableName)) {
+            query.exec("ROLLBACK");
+            if (error) *error = "Circular dependency detected";
             return false;
         }
     }
+
+    for (const QString &tableName : sortedTables) {
+        QJsonObject tableObj = tableData[tableName];
+
+        QJsonObject tableObjWithoutData = tableObj;
+        tableObjWithoutData["data"] = QJsonArray();
+        tableObjWithoutData["foreignKeys"] = QJsonArray();
+        tableObjWithoutData["constraints"] = QJsonArray();
+
+        if (!importTableFromJson(tableObjWithoutData, error)) {
+            query.exec("ROLLBACK");
+            return false;
+        }
+    }
+
+    for (const QString &tableName : sortedTables) {
+        QJsonObject tableObj = tableData[tableName];
+        QJsonArray dataArray = tableObj["data"].toArray();
+
+        for (const auto &rowValue : dataArray) {
+            QJsonArray rowArray = rowValue.toArray();
+            QVariantList row;
+
+            for (const auto &cellValue : rowArray) {
+                row.append(cellValue.toVariant());
+            }
+
+            if (!insertRow(tableName, row, error)) {
+                query.exec("ROLLBACK");
+                return false;
+            }
+        }
+
+        if (!syncSequence(tableName, error)) {
+            query.exec("ROLLBACK");
+            return false;
+        }
+    }
+
+    for (const QString &tableName : sortedTables) {
+        QJsonObject tableObj = tableData[tableName];
+
+        QJsonArray fksArray = tableObj["foreignKeys"].toArray();
+        for (const auto &fkValue : fksArray) {
+            QJsonObject fkObj = fkValue.toObject();
+
+            QString onDelete = fkObj["onDelete"].toString().toUpper();
+            QString onUpdate = fkObj["onUpdate"].toString().toUpper();
+
+            QString fkQuery = QString(
+                                  "ALTER TABLE %1 ADD CONSTRAINT %2 "
+                                  "FOREIGN KEY (%3) REFERENCES %4(%5)"
+                                  ).arg(tableName,
+                                       fkObj["constraintName"].toString(),
+                                       fkObj["columnName"].toString(),
+                                       fkObj["refTable"].toString(),
+                                       fkObj["refColumn"].toString());
+
+            if (!onDelete.isEmpty() && onDelete != "NO ACTION") {
+                fkQuery += " ON DELETE " + onDelete.replace("_", " ");
+            }
+
+            if (!onUpdate.isEmpty() && onUpdate != "NO ACTION") {
+                fkQuery += " ON UPDATE " + onUpdate.replace("_", " ");
+            }
+
+            if (!query.exec(fkQuery)) {
+                if (error) *error = "FK constraint error: " + query.lastError().text();
+                query.exec("ROLLBACK");
+                return false;
+            }
+        }
+
+        QJsonArray constraintsArray = tableObj["constraints"].toArray();
+        for (const auto &cValue : constraintsArray) {
+            QJsonObject cObj = cValue.toObject();
+
+            QString constraintQuery = QString(
+                                          "ALTER TABLE %1 ADD CONSTRAINT %2 %3"
+                                          ).arg(tableName,
+                                               cObj["constraintName"].toString(),
+                                               cObj["definition"].toString());
+
+            if (!query.exec(constraintQuery)) {
+                if (error) *error = "Constraint error: " + query.lastError().text();
+                query.exec("ROLLBACK");
+                return false;
+            }
+        }
+    }
+
+    if (!query.exec("COMMIT")) {
+        if (error) *error = "Failed to commit transaction";
+        return false;
+    }
+
     return true;
 }
 
@@ -550,7 +872,6 @@ bool DatabaseManager::exportTableToCsv(const QString &tableName, const QString &
 {
     auto columns = getTableColumns(tableName);
     auto data = getTableData(tableName);
-
     QStringList headers;
     for (const auto &col : columns) {
         headers.append(col.name);
@@ -558,7 +879,6 @@ bool DatabaseManager::exportTableToCsv(const QString &tableName, const QString &
 
     return exportQueryResultToCsv(data, headers, filePath, error);
 }
-
 bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *error)
 {
     QFile file(filePath);
@@ -570,15 +890,13 @@ bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *erro
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
 
-    stream << "-- Library Database Backup\n";
-    stream << "-- Generated by LibraryDB Application\n\n";
+    stream << "SET search_path TO " << schemaName << ";\n\n";
 
     QStringList tables = getTableNames();
 
     for (const QString &tableName : tables) {
         auto columns = getTableColumns(tableName);
 
-        stream << "-- Table: " << tableName << "\n";
         stream << "DROP TABLE IF EXISTS " << tableName << " CASCADE;\n";
         stream << "CREATE TABLE " << tableName << " (\n";
 
@@ -590,8 +908,20 @@ bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *erro
             if (col.isIdentity) {
                 colDef += "BIGSERIAL";
             } else {
-                colDef += (col.type.toUpper() == "INT" ? "BIGINT" : "TEXT");
+                QString colType = col.fullType.isEmpty() ?
+                                      (col.type.toUpper() == "INT" ? "BIGINT" : "TEXT") :
+                                      col.fullType.toUpper();
+                colDef += colType;
             }
+
+            if (!col.isNullable && !col.isIdentity) {
+                colDef += " NOT NULL";
+            }
+
+            if (!col.defaultValue.isEmpty() && !col.isIdentity) {
+                colDef += " DEFAULT " + col.defaultValue;
+            }
+
             columnDefs.append(colDef);
 
             if (col.isPrimaryKey) {
@@ -606,8 +936,45 @@ bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *erro
         }
 
         stream << "\n);\n\n";
+    }
 
+    for (const QString &tableName : tables) {
+        auto fks = getTableForeignKeys(tableName);
+
+        for (const auto &fk : fks) {
+            QString onDelete = fk.onDelete.toUpper();
+            QString onUpdate = fk.onUpdate.toUpper();
+
+            stream << "ALTER TABLE " << tableName << " ADD CONSTRAINT " << fk.constraintName
+                   << " FOREIGN KEY (" << fk.columnName << ") REFERENCES "
+                   << fk.refTable << "(" << fk.refColumn << ")";
+
+            if (!onDelete.isEmpty() && onDelete != "NO ACTION") {
+                stream << " ON DELETE " << onDelete.replace("_", " ");
+            }
+
+            if (!onUpdate.isEmpty() && onUpdate != "NO ACTION") {
+                stream << " ON UPDATE " << onUpdate.replace("_", " ");
+            }
+
+            stream << ";\n";
+        }
+
+        auto constraints = getTableConstraints(tableName);
+        for (const auto &c : constraints) {
+            stream << "ALTER TABLE " << tableName << " ADD CONSTRAINT " << c.constraintName
+                   << " " << c.definition << ";\n";
+        }
+
+        if (!fks.isEmpty() || !constraints.isEmpty()) {
+            stream << "\n";
+        }
+    }
+
+    for (const QString &tableName : tables) {
+        auto columns = getTableColumns(tableName);
         auto data = getTableData(tableName);
+
         if (!data.isEmpty()) {
             for (const auto &row : data) {
                 QStringList columnNames;
@@ -646,7 +1013,6 @@ bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *erro
     file.close();
     return true;
 }
-
 bool DatabaseManager::exportQueryResultToCsv(const QList<QVariantList> &data,
                                              const QStringList &headers,
                                              const QString &filePath,
@@ -657,7 +1023,6 @@ bool DatabaseManager::exportQueryResultToCsv(const QList<QVariantList> &data,
         if (error) *error = "Cannot open file for writing";
         return false;
     }
-
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
 

@@ -1,31 +1,44 @@
 #include "addtabledialog.h"
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QGridLayout>
 
 ColumnInputWidget::ColumnInputWidget(QWidget *parent)
     : QWidget(parent)
 {
-    QHBoxLayout *layout = new QHBoxLayout(this);
+    QGridLayout *layout = new QGridLayout(this);
 
-    QLabel *nameLabel = new QLabel("Название столбца:", this);
+    QLabel *nameLabel = new QLabel("Название:", this);
     nameEdit = new QLineEdit(this);
 
-    QLabel *typeLabel = new QLabel("Тип данных:", this);
+    QLabel *typeLabel = new QLabel("Тип:", this);
     typeCombo = new QComboBox(this);
-    typeCombo->addItem("int");
     typeCombo->addItem("text");
+    typeCombo->addItem("bigint");
+    typeCombo->addItem("integer");
+    typeCombo->addItem("date");
+    typeCombo->addItem("boolean");
+    typeCombo->addItem("numeric");
+    typeCombo->addItem("varchar");
 
-    QLabel *pkLabel = new QLabel("Primary key:", this);
-    primaryKeyCombo = new QComboBox(this);
-    primaryKeyCombo->addItem("нет");
-    primaryKeyCombo->addItem("да");
+    primaryKeyCheck = new QCheckBox("Primary Key", this);
+    identityCheck = new QCheckBox("Auto (SERIAL)", this);
+    nullableCheck = new QCheckBox("Nullable", this);
+    nullableCheck->setChecked(true);
 
-    layout->addWidget(nameLabel);
-    layout->addWidget(nameEdit);
-    layout->addWidget(typeLabel);
-    layout->addWidget(typeCombo);
-    layout->addWidget(pkLabel);
-    layout->addWidget(primaryKeyCombo);
+    QLabel *defaultLabel = new QLabel("Default:", this);
+    defaultEdit = new QLineEdit(this);
+    defaultEdit->setPlaceholderText("NULL или значение");
+
+    layout->addWidget(nameLabel, 0, 0);
+    layout->addWidget(nameEdit, 0, 1);
+    layout->addWidget(typeLabel, 0, 2);
+    layout->addWidget(typeCombo, 0, 3);
+    layout->addWidget(primaryKeyCheck, 0, 4);
+    layout->addWidget(identityCheck, 0, 5);
+    layout->addWidget(nullableCheck, 0, 6);
+    layout->addWidget(defaultLabel, 0, 7);
+    layout->addWidget(defaultEdit, 0, 8);
 }
 
 QString ColumnInputWidget::getColumnName() const
@@ -40,7 +53,22 @@ QString ColumnInputWidget::getColumnType() const
 
 bool ColumnInputWidget::isPrimaryKey() const
 {
-    return primaryKeyCombo->currentText() == "да";
+    return primaryKeyCheck->isChecked();
+}
+
+bool ColumnInputWidget::isIdentity() const
+{
+    return identityCheck->isChecked();
+}
+
+bool ColumnInputWidget::isNullable() const
+{
+    return nullableCheck->isChecked();
+}
+
+QString ColumnInputWidget::getDefaultValue() const
+{
+    return defaultEdit->text().trimmed();
 }
 
 AddTableDialog::AddTableDialog(QWidget *parent)
@@ -52,7 +80,7 @@ AddTableDialog::AddTableDialog(QWidget *parent)
 void AddTableDialog::setupUI()
 {
     setWindowTitle("Добавить таблицу");
-    setMinimumSize(800, 400);
+    setMinimumSize(1200, 500);
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
@@ -75,15 +103,18 @@ void AddTableDialog::setupUI()
 
     scrollArea = new QScrollArea(this);
     scrollArea->setWidgetResizable(true);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     columnsContainer = new QWidget();
     columnsLayout = new QVBoxLayout(columnsContainer);
     columnsLayout->setSpacing(10);
+    columnsLayout->addStretch();
 
     scrollArea->setWidget(columnsContainer);
     mainLayout->addWidget(scrollArea);
 
-    confirmButton = new QPushButton("подтвердить", this);
+    confirmButton = new QPushButton("Подтвердить", this);
     connect(confirmButton, &QPushButton::clicked, this, &AddTableDialog::onConfirm);
     mainLayout->addWidget(confirmButton);
 }
@@ -91,7 +122,14 @@ void AddTableDialog::setupUI()
 void AddTableDialog::onAddColumn()
 {
     ColumnInputWidget *columnWidget = new ColumnInputWidget(this);
-    columnsLayout->addWidget(columnWidget);
+
+    int count = columnsLayout->count();
+    if (count > 0 && columnsLayout->itemAt(count - 1)->spacerItem()) {
+        columnsLayout->insertWidget(count - 1, columnWidget);
+    } else {
+        columnsLayout->addWidget(columnWidget);
+    }
+
     columnWidgets.append(columnWidget);
 }
 
@@ -129,8 +167,13 @@ void AddTableDialog::onConfirm()
 
         DatabaseManager::ColumnInfo col;
         col.name = colName;
-        col.type = widget->getColumnType();
+        col.type = widget->getColumnType().contains("int") ? "int" : "text";
+        col.fullType = widget->getColumnType();
         col.isPrimaryKey = widget->isPrimaryKey();
+        col.isIdentity = widget->isIdentity();
+        col.isNullable = widget->isNullable();
+        col.defaultValue = widget->getDefaultValue();
+
         columns.append(col);
     }
 
