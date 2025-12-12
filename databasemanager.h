@@ -28,6 +28,7 @@ public:
         bool isNullable;
         QString defaultValue;
         QString fullType;
+        bool hasTextConstraint = false;
     };
 
     struct ForeignKeyInfo {
@@ -59,6 +60,7 @@ public:
                     const QVariant &value,
                     const QVariantList &primaryKeyValues,
                     QString *error);
+    bool changeColumnType(const QString &tableName, const QString &columnName, const QString &newType, QString *error = nullptr);
     bool addColumn(const QString &tableName, const ColumnInfo &column, QString *error = nullptr);
     bool dropColumn(const QString &tableName, const QString &columnName, QString *error = nullptr);
     bool renameColumn(const QString &tableName, const QString &oldName, const QString &newName, QString *error = nullptr);

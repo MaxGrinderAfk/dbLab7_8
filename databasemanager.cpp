@@ -76,6 +76,20 @@ QStringList DatabaseManager::getTableNames()
     return tables;
 }
 
+bool DatabaseManager::changeColumnType(const QString &tableName, const QString &columnName, const QString &newType, QString *error)
+{
+    QString queryStr = QString("ALTER TABLE %1 ALTER COLUMN %2 TYPE %3")
+    .arg(tableName, columnName, newType);
+
+    QSqlQuery query(db);
+    if (!query.exec(queryStr)) {
+        if (error) *error = query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
 QSqlQuery DatabaseManager::executeQuery(const QString &queryStr, bool *ok, QString *error)
 {
     QSqlQuery query(db);
@@ -879,6 +893,7 @@ bool DatabaseManager::exportTableToCsv(const QString &tableName, const QString &
 
     return exportQueryResultToCsv(data, headers, filePath, error);
 }
+
 bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *error)
 {
     QFile file(filePath);
@@ -1013,6 +1028,7 @@ bool DatabaseManager::exportDatabaseToSql(const QString &filePath, QString *erro
     file.close();
     return true;
 }
+
 bool DatabaseManager::exportQueryResultToCsv(const QList<QVariantList> &data,
                                              const QStringList &headers,
                                              const QString &filePath,
@@ -1023,22 +1039,25 @@ bool DatabaseManager::exportQueryResultToCsv(const QList<QVariantList> &data,
         if (error) *error = "Cannot open file for writing";
         return false;
     }
+
+    file.write("\xEF\xBB\xBF");
+
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
 
-    stream << headers.join(",") << "\n";
+    stream << headers.join(";") << "\n";
 
     for (const auto &row : data) {
         QStringList rowStrings;
         for (const auto &cell : row) {
             QString cellStr = cell.toString();
-            if (cellStr.contains(',') || cellStr.contains('"') || cellStr.contains('\n')) {
+            if (cellStr.contains(';') || cellStr.contains('"') || cellStr.contains('\n')) {
                 cellStr.replace("\"", "\"\"");
                 cellStr = "\"" + cellStr + "\"";
             }
             rowStrings.append(cellStr);
         }
-        stream << rowStrings.join(",") << "\n";
+        stream << rowStrings.join(";") << "\n";
     }
 
     file.close();

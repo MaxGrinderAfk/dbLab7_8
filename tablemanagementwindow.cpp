@@ -190,19 +190,36 @@ void CollapsibleTableWidget::onAddRow()
     values.resize(columns.size());
 
     for (int i = 0; i < columns.size(); ++i) {
+        if (columns[i].isIdentity) {
+            values[i] = QVariant();
+            continue;
+        }
 
-        if (columns[i].isPrimaryKey && !columns[i].isIdentity) {
-
+        if (columns[i].isPrimaryKey || !columns[i].isNullable) {
             bool ok = false;
-            QString prompt = QString("Введите значение для PK столбца \"%1\":")
-                                 .arg(columns[i].name);
+            QString columnLabel = columns[i].name;
+
+            if (columns[i].isPrimaryKey) {
+                columnLabel += " (PRIMARY KEY)";
+            } else {
+                columnLabel += " (NOT NULL)";
+            }
+
+            QString prompt = QString("Введите значение для столбца \"%1\":").arg(columnLabel);
             QString input = QInputDialog::getText(
-                this, "Значение ключа", prompt, QLineEdit::Normal, "", &ok
+                this, "Значение столбца", prompt, QLineEdit::Normal, "", &ok
                 );
 
             if (!ok) return;
+
             if (input.trimmed().isEmpty()) {
-                QMessageBox::warning(this, "Ошибка", "PK не может быть пустым");
+                if (columns[i].isPrimaryKey) {
+                    QMessageBox::warning(this, "Ошибка", "PRIMARY KEY не может быть пустым");
+                } else {
+                    QMessageBox::warning(this, "Ошибка",
+                                         QString("Столбец \"%1\" имеет ограничение NOT NULL и не может быть пустым")
+                                             .arg(columns[i].name));
+                }
                 return;
             }
 
@@ -256,6 +273,9 @@ void CollapsibleTableWidget::onAddColumn()
     nullableCheck->setChecked(true);
     layout->addWidget(nullableCheck);
 
+    QCheckBox *textConstraintCheck = new QCheckBox("Только текст (латиница и кириллица)", &dialog);
+    layout->addWidget(textConstraintCheck);
+
     QHBoxLayout *defaultLayout = new QHBoxLayout();
     QLabel *defaultLabel = new QLabel("Default:", &dialog);
     QLineEdit *defaultEdit = new QLineEdit(&dialog);
@@ -286,6 +306,19 @@ void CollapsibleTableWidget::onAddColumn()
 
     QString error;
     if (DatabaseManager::instance().addColumn(tableName, col, &error)) {
+        if (textConstraintCheck->isChecked()) {
+            QString constraintName = QString("%1_%2_text_check").arg(tableName, colName);
+            QString constraintQuery = QString(
+                                          "ALTER TABLE %1 ADD CONSTRAINT %2 CHECK (%3 ~ '^[a-zA-Zа-яА-ЯёЁ]*$')"
+                                          ).arg(tableName, constraintName, colName);
+
+            QSqlQuery query(DatabaseManager::instance().getDatabase());
+            if (!query.exec(constraintQuery)) {
+                QMessageBox::warning(this, "Предупреждение",
+                                     "Столбец добавлен, но не удалось добавить ограничение: " + query.lastError().text());
+            }
+        }
+
         loadTableData();
         emit needsRefresh();
     } else {
@@ -337,20 +370,79 @@ void CollapsibleTableWidget::onHeaderDoubleClicked(int index)
 
     QString oldName = columns[index].name;
 
-    bool ok;
-    QString newName = QInputDialog::getText(this, "Переименовать столбец",
-                                            "Новое имя столбца:",
-                                            QLineEdit::Normal, oldName, &ok);
+    QDialog dialog(this);
+    dialog.setWindowTitle("Редактировать столбец");
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
 
-    if (!ok || newName.isEmpty() || newName == oldName) return;
+    QHBoxLayout *nameLayout = new QHBoxLayout();
+    QLabel *nameLabel = new QLabel("Имя столбца:", &dialog);
+    QLineEdit *nameEdit = new QLineEdit(&dialog);
+    nameEdit->setText(oldName);
+    nameLayout->addWidget(nameLabel);
+    nameLayout->addWidget(nameEdit);
+    layout->addLayout(nameLayout);
+
+    QHBoxLayout *typeLayout = new QHBoxLayout();
+    QLabel *typeLabel = new QLabel("Тип данных:", &dialog);
+    QComboBox *typeCombo = new QComboBox(&dialog);
+    typeCombo->addItem("text");
+    typeCombo->addItem("bigint");
+    typeCombo->addItem("integer");
+    typeCombo->addItem("date");
+    typeCombo->addItem("boolean");
+    typeCombo->addItem("numeric");
+    typeCombo->addItem("varchar");
+
+    int currentIndex = typeCombo->findText(columns[index].fullType);
+    if (currentIndex >= 0) {
+        typeCombo->setCurrentIndex(currentIndex);
+    }
+
+    typeLayout->addWidget(typeLabel);
+    typeLayout->addWidget(typeCombo);
+    layout->addLayout(typeLayout);
+
+    QHBoxLayout *buttonsLayout = new QHBoxLayout();
+    QPushButton *okButton = new QPushButton("OK", &dialog);
+    QPushButton *cancelButton = new QPushButton("Отмена", &dialog);
+    connect(okButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+    buttonsLayout->addWidget(okButton);
+    buttonsLayout->addWidget(cancelButton);
+    layout->addLayout(buttonsLayout);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    QString newName = nameEdit->text().trimmed();
+    QString newType = typeCombo->currentText();
+
+    if (newName.isEmpty()) {
+        QMessageBox::warning(this, "Ошибка", "Имя столбца не может быть пустым");
+        return;
+    }
 
     QString error;
-    if (DatabaseManager::instance().renameColumn(tableName, oldName, newName, &error)) {
+    bool success = true;
+
+    if (newName != oldName) {
+        if (!DatabaseManager::instance().renameColumn(tableName, oldName, newName, &error)) {
+            QMessageBox::critical(this, "Ошибка", "Не удалось переименовать столбец: " + error);
+            success = false;
+        }
+    }
+
+    if (success && newType != columns[index].fullType) {
+        QString columnToChange = (newName != oldName) ? newName : oldName;
+        if (!DatabaseManager::instance().changeColumnType(tableName, columnToChange, newType, &error)) {
+            QMessageBox::critical(this, "Ошибка", "Не удалось изменить тип столбца: " + error);
+            success = false;
+        }
+    }
+
+    if (success) {
         loadTableData();
         emit needsRefresh();
-        QMessageBox::information(this, "Успех", "Столбец успешно переименован");
-    } else {
-        QMessageBox::critical(this, "Ошибка", "Не удалось переименовать столбец: " + error);
+        QMessageBox::information(this, "Успех", "Столбец успешно изменен");
     }
 }
 
